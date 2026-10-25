@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { Suspense, useState } from "react";
-import { ArrowLeft, ExternalLink, Lightbulb, Pencil, Plus, Trash2, TriangleAlert } from "lucide-react";
+import { ArrowLeft, ExternalLink, Lightbulb, Loader2, Pencil, Plus, RefreshCw, Trash2, TriangleAlert } from "lucide-react";
+import { useAI } from "@/lib/ai-client";
 import { useStore } from "@/lib/store";
 import { useDerived } from "@/lib/hooks";
 import { useTab } from "@/lib/use-tab";
@@ -42,9 +43,10 @@ function ItemDialog<T extends { id: string }>({ title, item, fields, onSave, onC
 
 function Inner() {
   const { id } = useParams<{ id: string }>();
-  const { data, update, remove, toast } = useStore();
+  const { data, update, remove, toast, research, runResearch } = useStore();
   const d = useDerived();
   const router = useRouter();
+  const ai = useAI();
   const [tab, setTab] = useTab<Tab>("identidade", TABS);
   const c = data.companies.find((x) => x.id === id);
   if (!c) return <Empty title="Empresa não encontrada" action={<Link href="/marcas"><Button>Voltar</Button></Link>} />;
@@ -55,7 +57,13 @@ function Inner() {
     <>
       <Link href="/marcas" className="mb-3 inline-flex items-center gap-1 text-xs text-ink-mute hover:text-pink"><ArrowLeft className="h-3.5 w-3.5" />Inteligência de marcas</Link>
       <PageHeader index="07" title={c.name} description={<span className="flex flex-wrap items-center gap-2">{c.sector || "Setor não informado"}{c.hq && ` · ${c.hq}`} <OriginBadge origin={c.origin} /> {c.website && <a href={c.website} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline">site oficial <ExternalLink className="h-3 w-3" /></a>}</span>}
-        actions={<Button variant="danger" onClick={() => { remove("companies", c.id); toast("Dossiê excluído", "info"); router.push("/marcas"); }}><Trash2 className="h-4 w-4" />Excluir dossiê</Button>} />
+        actions={<>
+          {ai === "ready" && c.origin !== "demo" && (() => { const job = research.find((r) => r.key === c.id && !r.error); return (
+            <Button variant="outline" disabled={!!job} onClick={() => runResearch(c.name, c.website, c.id)}>{job ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}{job ? "Pesquisando…" : c.origin === "api" ? "Atualizar pesquisa" : "Pesquisar automaticamente"}</Button>); })()}
+          <Button variant="danger" onClick={() => { remove("companies", c.id); toast("Dossiê excluído", "info"); router.push("/marcas"); }}><Trash2 className="h-4 w-4" />Excluir dossiê</Button>
+        </>} />
+      {research.find((r) => r.key === c.id && r.error) && <div className="mb-4 rounded-xl bg-pink-50 px-4 py-2.5 text-xs text-pink-700">Falha na pesquisa: {research.find((r) => r.key === c.id)?.error}</div>}
+      {c.origin === "api" && <div className="mb-4 rounded-xl bg-green-50 px-4 py-2.5 text-xs text-green-700">Dossiê gerado automaticamente por pesquisa na web em {fmtDate(c.lastResearchAt)}. Afirmações sem link foram classificadas pela IA e devem ser conferidas; links não confirmados pela pesquisa foram removidos. Você pode editar tudo.</div>}
       {c.origin === "demo" && <div className="mb-4 rounded-xl bg-pink-50 px-4 py-2.5 text-xs text-pink-700">Empresa fictícia. Todo o conteúdo deste dossiê é demonstrativo e serve para mostrar a estrutura da análise.</div>}
 
       <div className="mb-5 grid grid-cols-1 gap-4 md:grid-cols-[auto_1fr]">
@@ -102,7 +110,7 @@ function Identity({ c, patch }: { c: Company; patch: (p: Partial<Company>) => vo
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
       <Card className="lg:col-span-2">
-        <CardHeader title="Identidade da marca" description="Preencha a partir de fontes oficiais e registre-as abaixo." action={<Button size="sm" variant={edit ? "green" : "outline"} onClick={() => setEdit(!edit)}><Pencil className="h-3.5 w-3.5" />{edit ? "Concluir edição" : "Editar"}</Button>} />
+        <CardHeader title="Identidade da marca" description={c.origin === "api" ? "Preenchido pela pesquisa automática. Edite o que precisar." : "Preencha a partir de fontes oficiais e registre-as abaixo."} action={<Button size="sm" variant={edit ? "green" : "outline"} onClick={() => setEdit(!edit)}><Pencil className="h-3.5 w-3.5" />{edit ? "Concluir edição" : "Editar"}</Button>} />
         <CardBody className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           {edit && (
             <>
@@ -296,10 +304,12 @@ function Pains({ c, patch }: { c: Company; patch: (p: Partial<Company>) => void 
       <p className="flex items-start gap-2 text-xs text-ink-soft"><TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber" />Categorias mantidas separadas — não há nota única. Recorrência = ocorrências do tema ÷ tamanho da amostra analisada. Avaliações públicas não representam necessariamente todos os clientes ou funcionários. Não registre dados pessoais.</p>
       {list.length ? (
         <>
-          <Card>
-            <CardHeader title="Recorrência na amostra" description="% das avaliações analisadas que citam o tema" />
-            <CardBody><BarsChart layout="vertical" height={Math.max(140, list.length * 40)} x="theme" unit="%" series={[{ key: "pct", name: "Recorrência" }]} data={list.map((p) => ({ theme: p.theme, pct: p.sampleSize ? Math.round((p.recurrence / p.sampleSize) * 100) : 0 }))} /></CardBody>
-          </Card>
+          {list.some((p) => p.sampleSize > 0) && (
+            <Card>
+              <CardHeader title="Recorrência na amostra" description="% das avaliações analisadas que citam o tema (só temas com amostra quantificada)" />
+              <CardBody><BarsChart layout="vertical" height={Math.max(140, list.filter((p) => p.sampleSize > 0).length * 40)} x="theme" unit="%" series={[{ key: "pct", name: "Recorrência" }]} data={list.filter((p) => p.sampleSize > 0).map((p) => ({ theme: p.theme, pct: Math.round((p.recurrence / p.sampleSize) * 100) }))} /></CardBody>
+            </Card>
+          )}
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
             {list.map((p) => {
               const pattern = p.sampleSize >= 20 && p.recurrence / Math.max(1, p.sampleSize) >= 0.1;
@@ -307,12 +317,12 @@ function Pains({ c, patch }: { c: Company; patch: (p: Partial<Company>) => void 
                 <Card key={p.id} tone="white"><CardBody className="pt-5">
                   <div className="flex flex-wrap items-center gap-1">
                     <Badge tone={p.severity === "alta" ? "solidPink" : p.severity === "media" ? "pink" : "outline"}>gravidade {SEVERITY[p.severity]}</Badge>
-                    <Badge tone={pattern ? "solidGreen" : "outline"}>{pattern ? "padrão recorrente" : p.sampleSize < 20 ? "amostra pequena" : "pontual"}</Badge>
+                    <Badge tone={pattern ? "solidGreen" : "outline"}>{p.sampleSize === 0 ? "amostra não quantificada" : pattern ? "padrão recorrente" : p.sampleSize < 20 ? "amostra pequena" : "pontual"}</Badge>
                     <Badge tone="outline">{EVOLUTION[p.evolution]}</Badge>
                     <div className="ml-auto flex"><Button size="icon" variant="ghost" onClick={() => setIt(p)} aria-label="Editar"><Pencil className="h-3.5 w-3.5" /></Button><Button size="icon" variant="danger" onClick={() => patch({ pains: c.pains.filter((x) => x.id !== p.id) })} aria-label="Excluir"><Trash2 className="h-3.5 w-3.5" /></Button></div>
                   </div>
                   <h3 className="mt-2 font-display text-[15px] font-semibold text-green">{p.theme}</h3>
-                  <div className="text-[11px] text-ink-mute">{p.category} · {p.recurrence} de {p.sampleSize} na amostra · {p.period}</div>
+                  <div className="text-[11px] text-ink-mute">{p.category}{p.sampleSize > 0 && ` · ${p.recurrence} de ${p.sampleSize} na amostra`}{p.period && ` · ${p.period}`}</div>
                   <p className="mt-2 text-xs text-ink-soft">{p.summary}</p>
                   <dl className="mt-2 space-y-1 text-xs">
                     <div><dt className="inline font-medium">Resposta pública da empresa: </dt><dd className="inline text-ink-soft">{p.companyResponse || "Não identificada"}</dd></div>

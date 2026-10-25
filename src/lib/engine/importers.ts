@@ -18,7 +18,11 @@ const pending = (kind: PendingImport["kind"], fileName: string, summary: string,
   return { id: uid("imp"), origin: "import", createdAt: t, updatedAt: t, kind, fileName, summary, payload };
 };
 
-export interface ResumePayload { text: string; skills: string[]; years: number | null; emails: number }
+export interface ResumePayload {
+  text: string; skills: string[]; years: number | null; emails: number;
+  /** Preenchido quando a IA organizou o currículo. */
+  structured?: import("../ai-client").StructuredResume;
+}
 
 export function parseResume(text: string, fileName: string): PendingImport {
   const nt = norm(text);

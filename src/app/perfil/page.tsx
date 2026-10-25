@@ -2,10 +2,11 @@
 
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Check, Database, Download, FileUp, FlaskConical, Plug, Plus, RotateCcw, ShieldAlert, Sparkles, Trash2, Upload, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, Database, Download, FileUp, FlaskConical, KeyRound, Loader2, Plug, Plus, RotateCcw, ShieldAlert, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { useTab } from "@/lib/use-tab";
 import { INTEGRATIONS, type IntegrationStatus } from "@/lib/integrations/registry";
+import { aiPost, extractFile, fileToBase64, getAccessCode, setAccessCode, useAI, type StructuredResume } from "@/lib/ai-client";
 import { CSV_TEMPLATES, parseContactsCSV, parseJobsCSV, parseMetricsCSV, parseResume, type ResumePayload } from "@/lib/engine/importers";
 import { SKILL_LEVEL, WORK_MODE } from "@/lib/labels";
 import type { AppData, Contact, ContractType, Goals, Job, MetricSnapshot, PendingImport, Profile, Seniority, WorkMode } from "@/lib/types";
@@ -316,25 +317,76 @@ function GoalsTab() {
 /* --------------------------------------------------------------- Importações */
 function Imports() {
   const { data, add, remove, addMany, setProfile, toast } = useStore();
+  const ai = useAI();
   const [paste, setPaste] = useState("");
   const [kind, setKind] = useState<"curriculo" | "metricas" | "contatos" | "vagas">("curriculo");
   const [review, setReview] = useState<PendingImport | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  const ingestResume = async (text: string, name: string, pdf?: File) => {
+    const imp = parseResume(text, name);
+    if (ai === "ready") {
+      try {
+        setBusy("Organizando o currículo com IA…");
+        const body = text ? { text } : { pdfBase64: await fileToBase64(pdf!) };
+        const { profile } = await aiPost<{ profile: StructuredResume }>("/api/resume", body);
+        (imp.payload as ResumePayload).structured = profile;
+        imp.summary = `${profile.experiences?.length ?? 0} experiência(s), ${profile.education?.length ?? 0} formação(ões), ${profile.skills?.length ?? 0} competência(s) — organizado por IA`;
+      } catch (e) {
+        toast("IA indisponível — usando leitura simples: " + (e instanceof Error ? e.message : ""), "warn");
+      }
+    }
+    if (!text && !(imp.payload as ResumePayload).structured) { setBusy(null); return toast("O PDF parece ser uma imagem escaneada, sem texto. Ative a IA para ler esse tipo de arquivo.", "warn"); }
+    add("imports", imp); setReview(imp); setPaste(""); setBusy(null);
+  };
   const ingest = (text: string, name: string) => {
-    const imp = kind === "curriculo" ? parseResume(text, name) : kind === "metricas" ? parseMetricsCSV(text, name) : kind === "contatos" ? parseContactsCSV(text, name) : parseJobsCSV(text, name);
+    if (kind === "curriculo") return ingestResume(text, name);
+    const imp = kind === "metricas" ? parseMetricsCSV(text, name) : kind === "contatos" ? parseContactsCSV(text, name) : parseJobsCSV(text, name);
     add("imports", imp); setReview(imp); setPaste("");
   };
   const onFile = async (f: File) => {
-    if (/\.(pdf|docx?)$/i.test(f.name)) return toast("PDF/DOCX: extração prevista para a próxima etapa. Abra o arquivo, copie o texto e cole aqui.", "warn");
-    ingest(await f.text(), f.name);
+    try {
+      if (kind !== "curriculo" && !/\.(csv|txt)$/i.test(f.name)) return toast("Para métricas, contatos e vagas use arquivos CSV.", "warn");
+      setBusy(`Lendo ${f.name}…`);
+      const { text } = /\.(pdf|docx)$/i.test(f.name) ? await extractFile(f) : { text: await f.text() };
+      if (kind === "curriculo") await ingestResume(text, f.name, f);
+      else { setBusy(null); ingest(text, f.name); }
+    } catch (e) {
+      setBusy(null);
+      toast(e instanceof Error ? e.message : "Falha ao ler o arquivo", "warn");
+    }
   };
-  const approve = (imp: PendingImport, selected?: string[]) => {
+  const approve = (imp: PendingImport, opts: ApproveOptions) => {
     if (imp.kind === "curriculo") {
       const pl = imp.payload as ResumePayload;
-      const newSkills = (selected ?? pl.skills).filter((s) => !data.profile.skills.some((x) => x.name.toLowerCase() === s.toLowerCase())).map((s) => ({ name: s, level: 2, evidence: `Citado no currículo (${imp.fileName})` }));
-      setProfile({ resumeText: pl.text, skills: [...data.profile.skills, ...newSkills] });
-      toast(`Currículo salvo · ${newSkills.length} competência(s) adicionada(s) com nível 2 — revise os níveis`);
+      const st = pl.structured;
+      const p = data.profile;
+      if (st) {
+        const patch: Partial<Profile> = { resumeText: pl.text || p.resumeText };
+        if (opts.identity) Object.assign(patch, {
+          name: st.name || p.name, headline: st.headline || p.headline, about: st.about || p.about, location: st.location || p.location,
+          yearsExperience: st.yearsExperience || p.yearsExperience,
+        });
+        if (opts.experiences && st.experiences?.length) patch.experiences = st.experiences.map((e) => ({ id: uid("exp"), role: e.role, org: e.org, start: e.start, end: e.end, description: e.description, achievements: e.achievements ?? [] }));
+        if (opts.education && st.education?.length) patch.education = st.education.map((e) => ({ id: uid("edu"), ...e }));
+        if (opts.skills && st.skills?.length) {
+          const merged = [...p.skills];
+          for (const s of st.skills) {
+            const i = merged.findIndex((x) => x.name.toLowerCase() === s.name.toLowerCase());
+            if (i < 0) merged.push({ name: s.name, level: Math.max(0, Math.min(5, Math.round(s.level))), evidence: s.evidence });
+            else if (!merged[i].evidence && s.evidence) merged[i] = { ...merged[i], evidence: s.evidence };
+          }
+          patch.skills = merged;
+        }
+        if (opts.certifications && st.certifications?.length) patch.certifications = [...p.certifications, ...st.certifications.map((c) => ({ id: uid("cert"), ...c }))];
+        setProfile(patch);
+        toast("Perfil atualizado a partir do currículo — revise as competências");
+      } else {
+        const newSkills = (opts.selected ?? pl.skills).filter((s) => !p.skills.some((x) => x.name.toLowerCase() === s.toLowerCase())).map((s) => ({ name: s, level: 2, evidence: `Citado no currículo (${imp.fileName})` }));
+        setProfile({ resumeText: pl.text, skills: [...p.skills, ...newSkills] });
+        toast(`Currículo salvo · ${newSkills.length} competência(s) adicionada(s) com nível 2 — revise os níveis`);
+      }
     } else if (imp.kind === "metricas") { addMany("metrics", imp.payload as MetricSnapshot[]); toast("Métricas importadas"); }
     else if (imp.kind === "contatos") { addMany("contacts", imp.payload as Contact[]); toast("Contatos importados"); }
     else { addMany("jobs", imp.payload as Job[]); toast("Vagas importadas"); }
@@ -344,18 +396,25 @@ function Imports() {
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_360px]">
       <Card>
-        <CardHeader title="Importar dados" description="Nada entra nos seus dados sem revisão. Formatos aceitos: texto (.txt) e planilhas (.csv)." />
+        <CardHeader title="Importar dados" description="Nada entra nos seus dados sem a sua revisão." />
         <CardBody className="space-y-3">
           <Tabs value={kind} onChange={setKind} items={[{ value: "curriculo", label: "Currículo" }, { value: "metricas", label: "Métricas LinkedIn (CSV)" }, { value: "contatos", label: "Contatos (CSV)" }, { value: "vagas", label: "Vagas (CSV)" }]} />
-          <Textarea className="min-h-[180px] font-mono text-xs" placeholder={kind === "curriculo" ? "Cole o texto do currículo…" : "Cole o conteúdo CSV (com cabeçalho)…"} value={paste} onChange={(e) => setPaste(e.target.value)} />
-          <div className="flex flex-wrap gap-2">
-            <Button disabled={!paste.trim()} onClick={() => ingest(paste, kind === "curriculo" ? "texto colado" : "CSV colado")}><Upload className="h-4 w-4" />Analisar</Button>
-            <input ref={fileRef} type="file" accept=".txt,.csv,.pdf,.doc,.docx" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ""; }} />
-            <Button variant="outline" onClick={() => fileRef.current?.click()}><FileUp className="h-4 w-4" />Escolher arquivo</Button>
-            {kind !== "curriculo" && <Button variant="ghost" onClick={() => download(`modelo-${kind}.csv`, CSV_TEMPLATES[kind])}><Download className="h-4 w-4" />Baixar modelo CSV</Button>}
-          </div>
+          <input ref={fileRef} type="file" accept={kind === "curriculo" ? ".pdf,.docx,.txt" : ".csv,.txt"} className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ""; }} />
+          <button type="button" disabled={!!busy} onClick={() => fileRef.current?.click()}
+            onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) onFile(f); }}
+            className="flex w-full flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-green-300 bg-green-50/50 px-6 py-8 text-center transition hover:border-pink hover:bg-pink-50/40 disabled:opacity-70">
+            {busy ? <Loader2 className="h-7 w-7 animate-spin text-pink" /> : <FileUp className="h-7 w-7 text-green-500" />}
+            <span className="font-display text-sm font-semibold text-green">{busy ?? (kind === "curriculo" ? "Enviar currículo em PDF ou DOCX" : "Enviar arquivo CSV")}</span>
+            {!busy && <span className="text-xs text-ink-mute">Clique ou arraste o arquivo aqui · até 4 MB{kind === "curriculo" && (ai === "ready" ? " · a IA organiza experiências, formação e competências" : " · leitura simples de competências (ative a IA para preencher o perfil inteiro)")}</span>}
+          </button>
+          <details className="text-xs text-ink-soft">
+            <summary className="cursor-pointer">Ou colar texto</summary>
+            <Textarea className="mt-2 min-h-[140px] font-mono text-xs" placeholder={kind === "curriculo" ? "Cole o texto do currículo…" : "Cole o conteúdo CSV (com cabeçalho)…"} value={paste} onChange={(e) => setPaste(e.target.value)} />
+            <Button className="mt-2" disabled={!paste.trim() || !!busy} onClick={() => ingest(paste, kind === "curriculo" ? "texto colado" : "CSV colado")}><Upload className="h-4 w-4" />Analisar</Button>
+          </details>
+          {kind !== "curriculo" && <Button variant="ghost" onClick={() => download(`modelo-${kind}.csv`, CSV_TEMPLATES[kind])}><Download className="h-4 w-4" />Baixar modelo CSV</Button>}
           <MethodNote title="Formatos e limitações">
-            <p><strong>Currículo:</strong> o NEXO detecta competências de uma lista conhecida e o ano mais antigo citado. PDF e DOCX dependem de extração no navegador (próxima etapa) — por enquanto, cole o texto.</p>
+            <p><strong>Currículo:</strong> PDF, DOCX ou TXT. O texto é extraído no servidor e o arquivo não é guardado. Com a IA ativa, o currículo é organizado em experiências, formação, competências (com nível estimado e evidência) e certificações. Sem IA, só são detectadas competências de uma lista conhecida. PDFs escaneados (imagem) precisam da IA.</p>
             <p><strong>Contatos:</strong> compatível com o arquivo Connections.csv da exportação oficial de dados do LinkedIn (Configurações → Privacidade de dados → Obter uma cópia dos seus dados). Apague as linhas de nota antes do cabeçalho.</p>
             <p><strong>Métricas e vagas:</strong> use os modelos CSV. Datas em AAAA-MM-DD.</p>
           </MethodNote>
@@ -380,15 +439,52 @@ function Imports() {
   );
 }
 
-function ReviewDialog({ imp, onClose, onApprove }: { imp: PendingImport | null; onClose: () => void; onApprove: (i: PendingImport, sel?: string[]) => void }) {
+interface ApproveOptions { selected?: string[]; identity?: boolean; experiences?: boolean; education?: boolean; skills?: boolean; certifications?: boolean }
+
+function ReviewDialog({ imp, onClose, onApprove }: { imp: PendingImport | null; onClose: () => void; onApprove: (i: PendingImport, o: ApproveOptions) => void }) {
   const [sel, setSel] = useState<string[]>([]);
+  const [opts, setOpts] = useState<ApproveOptions>({ identity: true, experiences: true, education: true, skills: true, certifications: true });
   useEffect(() => { if (imp?.kind === "curriculo") setSel((imp.payload as ResumePayload).skills); }, [imp]);
   if (!imp) return null;
   const rows = Array.isArray(imp.payload) ? (imp.payload as Record<string, unknown>[]) : [];
+  const st = imp.kind === "curriculo" ? (imp.payload as ResumePayload).structured : undefined;
+  const Opt = ({ k, label, n }: { k: keyof ApproveOptions; label: string; n?: number }) => (
+    <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={!!opts[k]} onChange={(e) => setOpts({ ...opts, [k]: e.target.checked })} />{label}{n !== undefined && <span className="text-ink-mute">({n})</span>}</label>
+  );
+  const hidden = ["id", "origin", "createdAt", "updatedAt", "interactions", "history", "tags"];
   return (
-    <Dialog open onClose={onClose} wide title={`Revisar importação — ${imp.fileName}`} footer={<><Button variant="ghost" onClick={onClose}>Revisar depois</Button><Button onClick={() => onApprove(imp, sel)}><Check className="h-4 w-4" />Aprovar e importar</Button></>}>
-      <p className="mb-3 text-xs text-ink-soft">{imp.summary}. Confira antes de aprovar — dados importados só passam a valer depois desta revisão.</p>
-      {imp.kind === "curriculo" ? (
+    <Dialog open onClose={onClose} wide title={`Revisar importação — ${imp.fileName}`} footer={<><Button variant="ghost" onClick={onClose}>Revisar depois</Button><Button onClick={() => onApprove(imp, { ...opts, selected: sel })}><Check className="h-4 w-4" />Aprovar e importar</Button></>}>
+      <p className="mb-3 text-xs text-ink-soft">{imp.summary}. Confira antes de aprovar: os dados importados só passam a valer depois desta revisão.</p>
+      {st ? (
+        <div className="space-y-4">
+          <div className="flex flex-wrap gap-x-5 gap-y-2 rounded-xl bg-paper p-3">
+            <Opt k="identity" label="Nome, título, Sobre e localização" /><Opt k="experiences" label="Substituir experiências" n={st.experiences?.length} />
+            <Opt k="education" label="Substituir formação" n={st.education?.length} /><Opt k="skills" label="Adicionar competências novas" n={st.skills?.length} />
+            <Opt k="certifications" label="Adicionar certificações" n={st.certifications?.length} />
+          </div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="space-y-2 text-sm">
+              <div className="font-display font-semibold text-green">{st.name || "—"}</div>
+              <div className="text-xs text-ink-soft">{st.headline}</div>
+              <p className="text-xs leading-relaxed text-ink-soft">{st.about}</p>
+              <div className="pt-2 text-[11px] font-semibold uppercase tracking-wider text-ink-mute">Experiências</div>
+              {st.experiences?.map((e, i) => (
+                <div key={i} className="rounded-xl border border-paper-line bg-white p-2.5 text-xs">
+                  <div className="font-medium">{e.role} · {e.org}</div><div className="text-ink-mute">{e.start || "?"} – {e.end || "?"}</div>
+                  {e.achievements?.length > 0 && <ul className="mt-1 list-inside list-disc text-ink-soft">{e.achievements.map((a, j) => <li key={j}>{a}</li>)}</ul>}
+                </div>
+              ))}
+            </div>
+            <div className="space-y-2">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-mute">Competências (nível estimado · evidência)</div>
+              <div className="max-h-[320px] space-y-1 overflow-auto">{st.skills?.map((s, i) => <div key={i} className="flex gap-2 text-xs"><Badge tone={s.level >= 3 ? "green" : "outline"}>{s.level}/5</Badge><span className="font-medium">{s.name}</span><span className="truncate text-ink-mute" title={s.evidence}>{s.evidence}</span></div>)}</div>
+              <div className="pt-2 text-[11px] font-semibold uppercase tracking-wider text-ink-mute">Formação</div>
+              {st.education?.map((e, i) => <div key={i} className="text-xs">{e.course} — {e.institution} {e.year && `(${e.year})`}</div>)}
+            </div>
+          </div>
+          <p className="text-[11px] text-ink-mute">Competências que você já tem não são alteradas; só as novas entram. Os níveis são estimativas da IA a partir do texto do currículo.</p>
+        </div>
+      ) : imp.kind === "curriculo" ? (
         <div className="space-y-3">
           <div className="text-xs font-medium">Competências detectadas (desmarque as incorretas)</div>
           <div className="flex flex-wrap gap-2">{(imp.payload as ResumePayload).skills.map((s) => <Chip key={s} on={sel.includes(s)} onClick={() => setSel(sel.includes(s) ? sel.filter((x) => x !== s) : [...sel, s])}>{s}</Chip>)}</div>
@@ -398,8 +494,8 @@ function ReviewDialog({ imp, onClose, onApprove }: { imp: PendingImport | null; 
       ) : rows.length ? (
         <div className="max-h-[50vh] overflow-auto">
           <table className="w-full text-xs">
-            <thead className="sticky top-0 bg-paper text-left text-ink-mute"><tr>{Object.keys(rows[0]).filter((k) => !["id", "origin", "createdAt", "updatedAt", "interactions", "history", "tags"].includes(k)).slice(0, 8).map((k) => <th key={k} className="p-1.5">{k}</th>)}</tr></thead>
-            <tbody className="divide-y divide-paper-line">{rows.slice(0, 50).map((r, i) => <tr key={i}>{Object.entries(r).filter(([k]) => !["id", "origin", "createdAt", "updatedAt", "interactions", "history", "tags"].includes(k)).slice(0, 8).map(([k, v]) => <td key={k} className="p-1.5">{Array.isArray(v) ? v.join("; ") : String(v ?? "—")}</td>)}</tr>)}</tbody>
+            <thead className="sticky top-0 bg-paper text-left text-ink-mute"><tr>{Object.keys(rows[0]).filter((k) => !hidden.includes(k)).slice(0, 8).map((k) => <th key={k} className="p-1.5">{k}</th>)}</tr></thead>
+            <tbody className="divide-y divide-paper-line">{rows.slice(0, 50).map((r, i) => <tr key={i}>{Object.entries(r).filter(([k]) => !hidden.includes(k)).slice(0, 8).map(([k, v]) => <td key={k} className="p-1.5">{Array.isArray(v) ? v.join("; ") : String(v ?? "—")}</td>)}</tr>)}</tbody>
           </table>
           {rows.length > 50 && <p className="mt-2 text-xs text-ink-mute">Mostrando 50 de {rows.length}.</p>}
         </div>
@@ -418,6 +514,7 @@ function Integrations() {
     <div className="space-y-4">
       <div className="rounded-2xl border border-paper-line bg-paper-card px-4 py-3 text-xs text-ink-soft"><Plug className="mr-1 inline h-3.5 w-3.5 text-pink" />Nenhuma integração é simulada. O status vem do servidor e indica apenas se as variáveis de ambiente existem — valores de chaves nunca são enviados ao navegador. Sem scraping, automação de convites/mensagens ou publicação automática.</div>
       {err && <div className="rounded-xl bg-pink-50 px-4 py-2 text-xs text-pink-700">Não foi possível consultar o status (servidor indisponível).</div>}
+      <AccessCodeCard aiStatus={status?.ai} />
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         {INTEGRATIONS.map((i) => {
           const st = status?.[i.id];
@@ -439,6 +536,33 @@ function Integrations() {
         })}
       </div>
     </div>
+  );
+}
+
+function AccessCodeCard({ aiStatus }: { aiStatus?: IntegrationStatus }) {
+  const { toast } = useStore();
+  const [code, setCode] = useState("");
+  const [saved, setSaved] = useState(false);
+  useEffect(() => { const c = getAccessCode(); setCode(c); setSaved(!!c); }, []);
+  return (
+    <Card tone="white">
+      <CardHeader title={<span className="flex items-center gap-2"><KeyRound className="h-4 w-4 text-pink" />IA: pesquisa automática e leitura de currículo</span>}
+        description="Gera dossiês de empresas pesquisando na web e organiza currículos em PDF/DOCX." action={aiStatus === "ativa" ? <Badge tone="green">Ativa no servidor</Badge> : <Badge tone="pink">Não configurada</Badge>} />
+      <CardBody className="space-y-3 text-xs text-ink-soft">
+        {aiStatus !== "ativa" && (
+          <ol className="list-inside list-decimal space-y-1">
+            <li>Crie uma chave em <a className="underline" href="https://console.anthropic.com" target="_blank" rel="noreferrer">console.anthropic.com</a> (API Keys) e adicione créditos. A cobrança é por uso.</li>
+            <li>Na Vercel: projeto nexo → Settings → Environment Variables. Adicione <code className="rounded bg-paper px-1">ANTHROPIC_API_KEY</code> (a chave) e <code className="rounded bg-paper px-1">NEXO_ACCESS_CODE</code> (uma senha que você inventar).</li>
+            <li>Em Deployments, clique em ⋯ → Redeploy. Depois, digite aqui a mesma senha do passo 2.</li>
+          </ol>
+        )}
+        <div className="flex flex-wrap items-end gap-2">
+          <Field label="Código de acesso deste aparelho" hint="o mesmo valor de NEXO_ACCESS_CODE" className="min-w-[220px] flex-1"><Input type="password" value={code} onChange={(e) => { setCode(e.target.value); setSaved(false); }} /></Field>
+          <Button onClick={() => { setAccessCode(code); setSaved(true); toast("Código salvo neste aparelho"); }} disabled={!code}>{saved ? <><Check className="h-4 w-4" />Salvo</> : "Salvar"}</Button>
+        </div>
+        <p>O código protege seus créditos: sem ele, quem tivesse o link do site poderia usar a sua chave. Ele fica salvo só neste navegador; repita em cada aparelho.</p>
+      </CardBody>
+    </Card>
   );
 }
 

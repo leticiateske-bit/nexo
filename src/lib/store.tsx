@@ -5,10 +5,13 @@ import type { AppData, CollectionKey, Profile, Settings } from "./types";
 import { getRepository } from "./data";
 import { buildInitialProfile, buildSeed, DATA_VERSION, DEFAULT_SETTINGS } from "./data/seed";
 import { nowISO } from "./utils";
+import { generateDossier } from "./ai-client";
 
 type ItemOf<K extends CollectionKey> = AppData[K][number];
 
 interface Toast { id: number; message: string; tone: "ok" | "info" | "warn" }
+
+export interface ResearchJob { key: string; name: string; startedAt: number; companyId?: string; error?: string }
 
 interface StoreValue {
   data: AppData;
@@ -30,6 +33,10 @@ interface StoreValue {
   replaceAll: (d: AppData) => void;
   toast: (message: string, tone?: Toast["tone"]) => void;
   toasts: Toast[];
+  /** Pesquisas de dossiê em andamento (continuam ao trocar de página). */
+  research: ResearchJob[];
+  runResearch: (name: string, website?: string, keepId?: string) => Promise<string | null>;
+  dismissResearch: (key: string) => void;
 }
 
 const Ctx = createContext<StoreValue | null>(null);
@@ -53,6 +60,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [research, setResearch] = useState<ResearchJob[]>([]);
+  const dataRef = useRef(data);
+  dataRef.current = data;
   const first = useRef(true);
 
   useEffect(() => {
@@ -77,8 +87,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setTimeout(() => setToasts((ts) => ts.filter((x) => x.id !== id)), 3200);
   }, []);
 
+  const runResearch = useCallback(async (name: string, website = "", keepId?: string) => {
+    const key = keepId ?? name.toLowerCase();
+    setResearch((r) => [...r.filter((x) => x.key !== key), { key, name, startedAt: Date.now() }]);
+    try {
+      const { company, meta } = await generateDossier(name, website, dataRef.current.profile, keepId);
+      setData((d) => ({ ...d, companies: keepId ? d.companies.map((c) => (c.id === keepId ? { ...company, createdAt: c.createdAt } : c)) : [company, ...d.companies] }));
+      setResearch((r) => r.filter((x) => x.key !== key));
+      toast(`Dossiê de ${company.name} pronto · ${meta.sourcesSeen} fontes consultadas`);
+      return company.id;
+    } catch (e) {
+      setResearch((r) => r.map((x) => (x.key === key ? { ...x, error: e instanceof Error ? e.message : String(e) } : x)));
+      toast("Não foi possível gerar o dossiê", "warn");
+      return null;
+    }
+  }, [toast]);
+
   const value: StoreValue = {
     data, ready, error, savedAt, repoLabel: repo.label, toasts, toast,
+    research, runResearch, dismissResearch: (key) => setResearch((r) => r.filter((x) => x.key !== key)),
     view: (k) => {
       const arr = data[k] as ItemOf<typeof k>[];
       return data.settings.showDemo ? arr : arr.filter((x) => x.origin !== "demo");

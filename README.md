@@ -48,7 +48,15 @@ Metodologias completas: página `/metodologia` no app.
 
 ## Integrações
 
-Nenhuma está conectada nesta versão. O status vem de `/api/integrations/status` (só confere se as variáveis existem; os valores nunca vão para o navegador).
+A integração com o Claude está implementada: dossiês automáticos com pesquisa na web (`/api/dossier`) e organização de currículos (`/api/resume`). As demais não estão conectadas.
+A leitura de PDF/DOCX (`/api/extract`) funciona sem chave.
+
+### Ativar a IA
+1. Crie uma chave em console.anthropic.com e adicione créditos (cobrança por uso).
+2. Vercel → projeto → Settings → Environment Variables: `ANTHROPIC_API_KEY` e `NEXO_ACCESS_CODE` (uma senha sua).
+3. Redeploy. No app, em Perfil → Integrações, digite a mesma senha (uma vez por aparelho).
+
+A senha impede que outras pessoas com o link do site usem seus créditos. O status vem de `/api/integrations/status` (só confere se as variáveis existem; os valores nunca vão para o navegador).
 
 | Integração | Depende de | Alternativa no app |
 |---|---|---|
@@ -57,6 +65,6 @@ Nenhuma está conectada nesta versão. O status vem de `/api/integrations/status
 | Vagas (ex.: Adzuna) | chave do provedor | cadastro manual com link + CSV |
 | Notícias | chave do provedor | campos de fonte/data nos dossiês |
 | Avaliações | fonte com licença ou API | registro manual de dores com amostra |
-| IA (Claude) | `ANTHROPIC_API_KEY` + rota de servidor | gerador local por modelos |
+| **IA (Claude) — implementada** | `ANTHROPIC_API_KEY` + `NEXO_ACCESS_CODE` na Vercel | dossiê manual; leitura simples de currículo |
 
 Sem scraping, sem automação de convites ou mensagens, sem publicação automática.

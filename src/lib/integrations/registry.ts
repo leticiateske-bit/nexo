@@ -27,6 +27,6 @@ export const INTEGRATIONS: IntegrationDef[] = [
     requires: "Chave de um provedor de notícias com termos compatíveis.", alternative: "Biblioteca de referências e campos de fonte/data nos dossiês.", docs: "" },
   { id: "reviews", name: "Avaliações públicas (consumidores/empregadores)", purpose: "Relatório de dores.", envVars: [], implemented: false,
     requires: "Fontes com API ou licença que permita uso. Plataformas sem API autorizada não serão raspadas.", alternative: "Registro manual de dores com fonte, período e tamanho da amostra.", docs: "" },
-  { id: "ai", name: "Geração de texto com IA (Claude)", purpose: "Rascunhos mais ricos no Estúdio de Conteúdo.", envVars: ["ANTHROPIC_API_KEY"], implemented: false,
-    requires: "Chave da API, rota de servidor dedicada e revisão humana obrigatória.", alternative: "Gerador local por modelos, com lacunas [entre colchetes] para fatos reais.", docs: "https://docs.anthropic.com" },
+  { id: "ai", name: "IA com pesquisa na web (Claude)", purpose: "Gera dossiês de empresas automaticamente com fontes e organiza currículos importados.", envVars: ["ANTHROPIC_API_KEY", "NEXO_ACCESS_CODE"], implemented: true,
+    requires: "Chave da API (console.anthropic.com, cobrança por uso) e um código de acesso que protege seus créditos, cadastrados nas variáveis de ambiente da Vercel.", alternative: "Dossiê preenchido manualmente; currículo lido por regras simples.", docs: "https://docs.claude.com" },
 ];
