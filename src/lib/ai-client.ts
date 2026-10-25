@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { IntegrationStatus } from "./integrations/registry";
-import type { Company, Profile } from "./types";
+import type { Company, Job, Profile } from "./types";
 import { nowISO, uid } from "./utils";
 
 const KEY = "nexo:access-code";
@@ -78,4 +78,38 @@ export async function fileToBase64(file: File) {
   let bin = "";
   for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
   return btoa(bin);
+}
+
+/* ---------------------------------------------------------------- Vagas */
+
+export interface JobSearchInput { roles: string[]; cities: string[]; remote: boolean; seniority: string[]; skills: string[]; companies: string[]; exclude: string[] }
+type FoundJob = Omit<Job, "id" | "origin" | "createdAt" | "updatedAt" | "status" | "notes" | "nextStep" | "history">;
+
+export async function searchJobs(input: JobSearchInput): Promise<{ jobs: Job[]; discarded: number }> {
+  const { jobs, meta } = await aiPost<{ jobs: FoundJob[]; meta: { discarded: number } }>("/api/jobs", input);
+  const t = nowISO();
+  return {
+    discarded: meta.discarded,
+    jobs: jobs.map((j) => ({ ...j, id: uid("job"), origin: "api", createdAt: t, updatedAt: t, status: "interessada", notes: "", nextStep: "", history: [{ date: t.slice(0, 10), status: "interessada", note: "Encontrada pela busca automática" }] })),
+  };
+}
+
+/* ---------------------------------------------------------- Publicações */
+
+export interface WrittenPost {
+  title: string; hook: string; body: string; conclusion: string; cta: string; hashtags: string[]; keywords: string[];
+  audience: string; rationale: string; visualGuide: string; factsUsed: string[]; sources: { label: string; url: string }[];
+}
+
+export async function writePost(idea: { title: string; objective: string; approach: string; theme: string; format: string; trend?: { what: string; why: string; source: string; url: string; kind: string } }, p: Profile, previous: string[]) {
+  const { post } = await aiPost<{ post: WrittenPost }>("/api/post", {
+    idea,
+    previous,
+    profile: {
+      name: p.name, headline: p.headline, about: p.about, targetRoles: p.targetRoles, interests: p.interests.map((i) => i.area),
+      experiences: p.experiences.map((e) => ({ role: e.role, org: e.org, description: e.description, achievements: e.achievements })),
+      skills: p.skills, education: p.education.map((e) => `${e.course} — ${e.institution}`), resumeText: p.resumeText,
+    },
+  });
+  return post;
 }

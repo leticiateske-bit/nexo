@@ -38,6 +38,8 @@ export interface ResearchResult {
   text: string;
   /** URLs que a pesquisa realmente retornou ou abriu — usados para validar as fontes citadas. */
   seenUrls: Set<string>;
+  /** URLs cujas páginas foram efetivamente abertas (web_fetch). */
+  fetchedUrls: Set<string>;
   searches: number;
 }
 
@@ -48,6 +50,7 @@ export interface ResearchResult {
 export async function researchWithWeb(system: string, prompt: string, opts: { maxSearches?: number; maxFetches?: number } = {}): Promise<ResearchResult> {
   const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: prompt }];
   const seenUrls = new Set<string>();
+  const fetchedUrls = new Set<string>();
   let searches = 0;
   let text = "";
 
@@ -76,6 +79,7 @@ export async function researchWithWeb(system: string, prompt: string, opts: { ma
         for (const r of block.content) seenUrls.add(normUrl(r.url));
       } else if (block.type === "web_fetch_tool_result" && block.content.type === "web_fetch_result") {
         seenUrls.add(normUrl(block.content.url));
+        fetchedUrls.add(normUrl(block.content.url));
       } else if (block.type === "text") {
         text += block.text;
       }
@@ -89,18 +93,18 @@ export async function researchWithWeb(system: string, prompt: string, opts: { ma
     if (response.stop_reason === "max_tokens") throw new Error("A resposta ficou longa demais e foi cortada. Tente novamente.");
     break;
   }
-  return { text, seenUrls, searches };
+  return { text, seenUrls, fetchedUrls, searches };
 }
 
 /** Chamada simples (sem web) que devolve texto — ex.: estruturar um currículo. */
-export async function complete(system: string, content: Anthropic.Beta.BetaContentBlockParam[] | string): Promise<string> {
+export async function complete(system: string, content: Anthropic.Beta.BetaContentBlockParam[] | string, effort: "low" | "medium" | "high" = "medium"): Promise<string> {
   const response = await getClient().beta.messages
     .stream({
       model: MODEL,
       max_tokens: 32000,
       betas: ["server-side-fallback-2026-07-01"],
       fallbacks: "default",
-      output_config: { effort: "medium" },
+      output_config: { effort },
       system,
       messages: [{ role: "user", content }],
     })

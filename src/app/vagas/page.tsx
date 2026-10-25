@@ -1,7 +1,8 @@
 "use client";
 
-import { Suspense, useMemo, useState } from "react";
-import { AlertTriangle, ExternalLink, GitCompare, Kanban, List, Plus, Search, SlidersHorizontal, Trash2 } from "lucide-react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { AlertTriangle, ExternalLink, GitCompare, Kanban, List, Loader2, Plus, Search, SlidersHorizontal, Sparkles, Trash2, X } from "lucide-react";
+import { useAI } from "@/lib/ai-client";
 import { useStore } from "@/lib/store";
 import { useDerived } from "@/lib/hooks";
 import { useTab } from "@/lib/use-tab";
@@ -28,6 +29,8 @@ function Inner() {
   const [detail, setDetail] = useState<string | null>(null);
   const [weightsOpen, setWeightsOpen] = useState(false);
   const [compare, setCompare] = useState<string[]>([]);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const ai = useAI();
 
   const save = (j: Job) => {
     if (!j.title || !j.company) return toast("Cargo e empresa são obrigatórios.", "warn");
@@ -41,7 +44,8 @@ function Inner() {
   return (
     <>
       <PageHeader index="06" title="Vagas e oportunidades" description="Registre vagas a partir do link original. A compatibilidade mede aderência ao seu perfil — não é probabilidade de contratação."
-        actions={<><Button variant="outline" onClick={() => setWeightsOpen(true)}><SlidersHorizontal className="h-4 w-4" />Pesos do índice</Button><Button onClick={() => setEditing(blank())}><Plus className="h-4 w-4" />Registrar vaga</Button></>} />
+        actions={<><Button variant="outline" onClick={() => setWeightsOpen(true)}><SlidersHorizontal className="h-4 w-4" />Pesos do índice</Button><Button variant="outline" onClick={() => setEditing(blank())}><Plus className="h-4 w-4" />Registrar vaga</Button><Button onClick={() => setSearchOpen(true)}><Sparkles className="h-4 w-4" />Buscar vagas com IA</Button></>} />
+      <JobSearchBanner />
       <Tabs className="mb-5" value={tab} onChange={setTab} items={[
         { value: "lista", label: <span className="flex items-center gap-1.5"><List className="h-3.5 w-3.5" />Buscador</span>, count: d.jobs.length },
         { value: "pipeline", label: <span className="flex items-center gap-1.5"><Kanban className="h-3.5 w-3.5" />Candidaturas</span> },
@@ -54,6 +58,7 @@ function Inner() {
       <JobDetail job={detailJob} fit={detailJob ? d.jobFits.get(detailJob.id)! : null} onClose={() => setDetail(null)} onEdit={(j) => { setDetail(null); setEditing(j); }} setStatus={setStatus} />
       <JobDialog job={editing} onClose={() => setEditing(null)} onSave={save} />
       <WeightsDialog open={weightsOpen} onClose={() => setWeightsOpen(false)} />
+      <JobSearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} ai={ai} />
     </>
   );
 }
@@ -313,6 +318,62 @@ function WeightsDialog({ open, onClose }: { open: boolean; onClose: () => void }
           <p>Competências: média de min(nível/3, 1) para cada competência exigida. Experiência: anos registrados vs referência NEXO da senioridade (−25 pontos por ano faltante). Formação/requisitos: formação exigida e requisitos comprovados no perfil. Objetivos: cargo-alvo (100) ou prioridade da área. Logística: modalidade, cidade e salário (só quando divulgado e com pretensão definida).</p>
         </MethodNote>
       </div>
+    </Dialog>
+  );
+}
+
+function JobSearchBanner() {
+  const { jobSearch, clearJobSearch } = useStore();
+  const [, tick] = useState(0);
+  const running = !!jobSearch && !jobSearch.done && !jobSearch.error;
+  useEffect(() => { if (!running) return; const t = setInterval(() => tick((x) => x + 1), 1000); return () => clearInterval(t); }, [running]);
+  if (!jobSearch) return null;
+  const secs = Math.floor((Date.now() - jobSearch.startedAt) / 1000);
+  return (
+    <div className={cn("mb-4 flex items-start gap-3 rounded-2xl border px-4 py-3 text-sm", jobSearch.error ? "border-pink/40 bg-pink-50" : "border-green-100 bg-white")}>
+      {running ? <Loader2 className="mt-0.5 h-4 w-4 animate-spin text-pink" /> : jobSearch.error ? <AlertTriangle className="mt-0.5 h-4 w-4 text-pink" /> : <Sparkles className="mt-0.5 h-4 w-4 text-pink" />}
+      <div className="flex-1 text-xs text-ink-soft">
+        {running && <>Buscando vagas reais em portais e sites de carreira… {Math.floor(secs / 60)}:{String(secs % 60).padStart(2, "0")} · leva de 1 a 4 minutos e continua se você trocar de página.</>}
+        {jobSearch.error && <span className="text-pink-700">{jobSearch.error}</span>}
+        {jobSearch.done && <><strong className="text-green">{jobSearch.done.added} vaga(s) nova(s)</strong> adicionada(s) como “Interessada”, já com compatibilidade calculada.{jobSearch.done.duplicates > 0 && ` ${jobSearch.done.duplicates} já estavam salvas.`}{jobSearch.done.discarded > 0 && ` ${jobSearch.done.discarded} descartada(s) por não terem link confirmado ou estarem encerradas.`} Vagas marcadas “ativa não confirmada” tiveram só o anúncio visto na busca — confira o link antes de se candidatar.</>}
+      </div>
+      {!running && <Button size="icon" variant="ghost" onClick={clearJobSearch} aria-label="Fechar"><X className="h-4 w-4" /></Button>}
+    </div>
+  );
+}
+
+function JobSearchDialog({ open, onClose, ai }: { open: boolean; onClose: () => void; ai: ReturnType<typeof useAI> }) {
+  const { data, runJobSearch, jobSearch, toast } = useStore();
+  const p = data.profile;
+  const [roles, setRoles] = useState<string[]>(p.targetRoles);
+  const [cities, setCities] = useState<string[]>(p.cities);
+  const [remote, setRemote] = useState(p.workModes.includes("remoto"));
+  useEffect(() => { if (open) { setRoles(p.targetRoles); setCities(p.cities); setRemote(p.workModes.includes("remoto")); } }, [open, p.targetRoles, p.cities, p.workModes]);
+  const running = !!jobSearch && !jobSearch.done && !jobSearch.error;
+  const start = () => {
+    if (!roles.length) return toast("Informe ao menos um cargo.", "warn");
+    onClose();
+    runJobSearch({
+      roles, cities, remote, seniority: p.targetSeniority,
+      skills: p.skills.map((s) => s.name), companies: [...p.companiesOfInterest, ...data.companies.filter((c) => c.origin !== "demo").map((c) => c.name)],
+      exclude: data.jobs.filter((j) => j.origin !== "demo").map((j) => `${j.title} — ${j.company}`),
+    });
+  };
+  return (
+    <Dialog open={open} onClose={onClose} title="Buscar vagas com IA" footer={ai === "ready" ? <Button disabled={running} onClick={start}><Search className="h-4 w-4" />{running ? "Busca em andamento…" : "Buscar agora"}</Button> : undefined}>
+      {ai === "ready" ? (
+        <div className="space-y-3">
+          <p className="text-xs text-ink-soft">O NEXO procura vagas abertas em sites de carreira e portais (Gupy, LinkedIn Jobs, Vagas.com, Indeed e outros) e adiciona até 12 com o link original. Vagas sem link confirmado pela busca são descartadas, e o salário só aparece quando estiver no anúncio.</p>
+          <Field label="Cargos" hint="vírgulas"><TagInput value={roles} onChange={setRoles} /></Field>
+          <Field label="Cidades"><TagInput value={cities} onChange={setCities} /></Field>
+          <label className="flex items-center gap-2 text-xs text-ink-soft"><input type="checkbox" checked={remote} onChange={(e) => setRemote(e.target.checked)} />Incluir vagas remotas</label>
+          <p className="text-[11px] text-ink-mute">Senioridade, competências e empresas de interesse vêm do seu perfil. Custo estimado: semelhante ao de um dossiê.</p>
+        </div>
+      ) : ai === "needs_code" ? (
+        <p className="text-sm text-ink-soft">A IA está ativa no servidor, mas falta o código de acesso neste aparelho. Cadastre em <a className="underline" href="/perfil?tab=integracoes">Perfil → Integrações</a>.</p>
+      ) : (
+        <p className="text-sm text-ink-soft">A busca automática precisa da chave da API do Claude configurada na Vercel. Veja o passo a passo em <a className="underline" href="/perfil?tab=integracoes">Perfil → Integrações</a>.</p>
+      )}
     </Dialog>
   );
 }

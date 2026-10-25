@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Copy, CopyPlus, Plus, Trash2, X } from "lucide-react";
+import { Copy, CopyPlus, Loader2, Plus, Sparkles, Trash2, X } from "lucide-react";
+import { useAI, writePost } from "@/lib/ai-client";
 import type { Post, PostApproach, PostFormat, PostObjective, PostStatus } from "@/lib/types";
 import { POST_APPROACH, POST_FORMAT, POST_OBJECTIVE, POST_STATUS } from "@/lib/labels";
 import { postFullText } from "@/lib/engine/content";
@@ -13,6 +14,8 @@ import { OriginBadge } from "./nexo";
 export function PostEditor({ post, open, onClose }: { post: Post | null; open: boolean; onClose: () => void }) {
   const { add, update, remove, toast, data } = useStore();
   const [p, setP] = useState<Post | null>(post);
+  const [writing, setWriting] = useState(false);
+  const ai = useAI();
   useEffect(() => setP(post), [post]);
   if (!p) return null;
   const exists = data.posts.some((x) => x.id === p.id);
@@ -31,12 +34,27 @@ export function PostEditor({ post, open, onClose }: { post: Post | null; open: b
     toast("Publicação duplicada");
     onClose();
   };
+  const rewrite = async () => {
+    setWriting(true);
+    try {
+      const w = await writePost({ title: p.title, objective: p.objective, approach: p.approach, theme: p.theme, format: p.format }, data.profile,
+        data.posts.filter((x) => x.id !== p.id && x.origin !== "demo").map((x) => x.hook).filter(Boolean));
+      setP({ ...p, hook: w.hook, body: w.body, conclusion: w.conclusion, cta: w.cta, hashtags: w.hashtags, keywords: w.keywords, visualGuide: w.visualGuide || p.visualGuide,
+        rationale: `${w.rationale}${w.factsUsed.length ? `\n\nFatos do perfil usados (confira): ${w.factsUsed.join("; ")}` : ""}` });
+      toast("Texto reescrito — revise e salve");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Falha ao reescrever", "warn");
+    } finally {
+      setWriting(false);
+    }
+  };
   const copy = async () => { await navigator.clipboard.writeText(postFullText(p)); toast("Texto copiado — publique manualmente no LinkedIn"); };
 
   return (
     <Dialog open={open} onClose={onClose} wide title={<span className="flex items-center gap-2">{exists ? "Editar publicação" : "Novo rascunho"} <OriginBadge origin={p.origin} /></span>}
       footer={<>
         {exists && <Button variant="danger" className="mr-auto" onClick={() => { remove("posts", p.id); toast("Publicação excluída", "info"); onClose(); }}><Trash2 className="h-4 w-4" />Excluir</Button>}
+        {ai === "ready" && <Button variant="outline" disabled={writing} onClick={rewrite}>{writing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}{writing ? "Escrevendo…" : "Reescrever com IA"}</Button>}
         <Button variant="outline" onClick={copy}><Copy className="h-4 w-4" />Copiar texto</Button>
         {exists && <Button variant="outline" onClick={duplicate}><CopyPlus className="h-4 w-4" />Duplicar</Button>}
         <Button onClick={save}>Salvar</Button>

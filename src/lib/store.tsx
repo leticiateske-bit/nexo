@@ -5,11 +5,13 @@ import type { AppData, CollectionKey, Profile, Settings } from "./types";
 import { getRepository } from "./data";
 import { buildInitialProfile, buildSeed, DATA_VERSION, DEFAULT_SETTINGS } from "./data/seed";
 import { nowISO } from "./utils";
-import { generateDossier } from "./ai-client";
+import { generateDossier, searchJobs, type JobSearchInput } from "./ai-client";
 
 type ItemOf<K extends CollectionKey> = AppData[K][number];
 
 interface Toast { id: number; message: string; tone: "ok" | "info" | "warn" }
+
+export interface JobSearchState { startedAt: number; error?: string; done?: { added: number; duplicates: number; discarded: number } }
 
 export interface ResearchJob { key: string; name: string; startedAt: number; companyId?: string; error?: string }
 
@@ -37,6 +39,9 @@ interface StoreValue {
   research: ResearchJob[];
   runResearch: (name: string, website?: string, keepId?: string) => Promise<string | null>;
   dismissResearch: (key: string) => void;
+  jobSearch: JobSearchState | null;
+  runJobSearch: (input: JobSearchInput) => Promise<void>;
+  clearJobSearch: () => void;
 }
 
 const Ctx = createContext<StoreValue | null>(null);
@@ -61,6 +66,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [research, setResearch] = useState<ResearchJob[]>([]);
+  const [jobSearch, setJobSearch] = useState<JobSearchState | null>(null);
   const dataRef = useRef(data);
   dataRef.current = data;
   const first = useRef(true);
@@ -103,7 +109,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   }, [toast]);
 
+  const runJobSearch = useCallback(async (input: JobSearchInput) => {
+    setJobSearch({ startedAt: Date.now() });
+    try {
+      const { jobs, discarded } = await searchJobs(input);
+      const existing = dataRef.current.jobs;
+      const key = (j: { url: string; title: string; company: string }) => (j.url || `${j.title}|${j.company}`).toLowerCase().replace(/\/$/, "");
+      const seen = new Set(existing.map(key));
+      const fresh = jobs.filter((j) => !seen.has(key(j)));
+      setData((d) => ({ ...d, jobs: [...fresh, ...d.jobs] }));
+      setJobSearch({ startedAt: Date.now(), done: { added: fresh.length, duplicates: jobs.length - fresh.length, discarded } });
+      toast(fresh.length ? `${fresh.length} vaga(s) nova(s) encontrada(s)` : "Nenhuma vaga nova desta vez", fresh.length ? "ok" : "info");
+    } catch (e) {
+      setJobSearch({ startedAt: Date.now(), error: e instanceof Error ? e.message : String(e) });
+      toast("Falha na busca de vagas", "warn");
+    }
+  }, [toast]);
+
   const value: StoreValue = {
+    jobSearch, runJobSearch, clearJobSearch: () => setJobSearch(null),
     data, ready, error, savedAt, repoLabel: repo.label, toasts, toast,
     research, runResearch, dismissResearch: (key) => setResearch((r) => r.filter((x) => x.key !== key)),
     view: (k) => {

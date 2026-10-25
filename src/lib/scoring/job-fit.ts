@@ -90,5 +90,12 @@ export function jobFit(job: Job, profile: Profile, w: JobWeights): JobFit {
   } else log.gaps.push(job.salaryMax ? "Defina sua pretensão salarial no perfil para comparar." : "Salário não divulgado — não considerado.");
   log.score = Math.round(lp.reduce((a, b) => a + b, 0) / lp.length);
 
-  return { ...combine([skills, exp, edu, goals, log]), matched, partialSkills, missing };
+  const result = combine([skills, exp, edu, goals, log]);
+  // Anúncios com poucos requisitos inflam a pontuação: sinaliza e reduz a confiança.
+  const reqCount = job.skills.length + job.requirements.length;
+  if (reqCount < 4) {
+    skills.gaps.push(`Anúncio com poucos requisitos registrados (${reqCount}) — compatibilidade pouco confiável.`);
+    if (result.confidence === "alta") result.confidence = "media";
+  }
+  return { ...result, matched, partialSkills, missing };
 }

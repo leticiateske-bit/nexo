@@ -1,7 +1,8 @@
 "use client";
 
-import { Suspense, useMemo, useState } from "react";
-import { BookMarked, ChevronLeft, ChevronRight, ExternalLink, FlaskConical, Lightbulb, Plus, Trash2, Wand2 } from "lucide-react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { BookMarked, ChevronLeft, ChevronRight, ExternalLink, FlaskConical, Lightbulb, Loader2, Plus, RefreshCw, Sparkles, Trash2, Wand2 } from "lucide-react";
+import { useAI, writePost, type WrittenPost } from "@/lib/ai-client";
 import { useStore } from "@/lib/store";
 import { useTab } from "@/lib/use-tab";
 import { generateIdeas, generatePost, themePerformance, type Idea } from "@/lib/engine/content";
@@ -51,7 +52,31 @@ function Generator({ onCreate }: { onCreate: (p: Post) => void }) {
   const [pick, setPick] = useState<Idea | null>(null);
   const [approach, setApproach] = useState<PostApproach>("tecnica");
   const list = ideas.filter((i) => obj === "all" || i.objective === obj);
-  const preview = pick ? generatePost({ objective: pick.objective, approach, theme: pick.theme, format: pick.format, trend: pick.trend, title: pick.title }, data.profile) : null;
+  const ai = useAI();
+  const [written, setWritten] = useState<Record<string, WrittenPost | "loading" | { error: string }>>({});
+  const [useTemplate, setUseTemplate] = useState(false);
+  const base = pick ? generatePost({ objective: pick.objective, approach, theme: pick.theme, format: pick.format, trend: pick.trend, title: pick.title }, data.profile) : null;
+  const wkey = pick ? `${pick.id}:${approach}` : "";
+  const w = written[wkey];
+  const aiPost = w && w !== "loading" && !("error" in w) ? w : null;
+  const preview = base && aiPost && !useTemplate
+    ? { ...base, title: aiPost.title, hook: aiPost.hook, body: aiPost.body, conclusion: aiPost.conclusion, cta: aiPost.cta, hashtags: aiPost.hashtags, keywords: aiPost.keywords,
+        audience: aiPost.audience || base.audience, visualGuide: aiPost.visualGuide || base.visualGuide, sources: aiPost.sources,
+        rationale: `${aiPost.rationale}${aiPost.factsUsed.length ? `\n\nFatos do perfil usados (confira): ${aiPost.factsUsed.join("; ")}` : ""}` }
+    : base;
+  const write = async (force = false) => {
+    if (!pick || ai !== "ready" || (!force && written[wkey])) return;
+    const key = wkey;
+    setWritten((x) => ({ ...x, [key]: "loading" }));
+    try {
+      const post = await writePost({ title: pick.title, objective: pick.objective, approach, theme: pick.theme, format: pick.format, trend: pick.trend ? { what: pick.trend.what, why: pick.trend.why, source: pick.trend.source, url: pick.trend.url, kind: pick.trend.kind } : undefined },
+        data.profile, data.posts.filter((x) => x.origin !== "demo").map((x) => x.hook).filter(Boolean));
+      setWritten((x) => ({ ...x, [key]: post }));
+    } catch (e) {
+      setWritten((x) => ({ ...x, [key]: { error: e instanceof Error ? e.message : String(e) } }));
+    }
+  };
+  useEffect(() => { if (pick && ai === "ready" && !useTemplate) write(); }, [wkey, ai, useTemplate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="space-y-4">
@@ -88,19 +113,28 @@ function Generator({ onCreate }: { onCreate: (p: Post) => void }) {
       </MethodNote>
 
       <Dialog open={!!pick} onClose={() => setPick(null)} wide title="Escolha a abordagem"
-        footer={<><Button variant="outline" onClick={() => setPick(null)}>Cancelar</Button><Button onClick={() => { if (preview) { onCreate(preview); setPick(null); } }}>Abrir no editor</Button></>}>
+        footer={<>
+          {ai === "ready" && <label className="mr-auto flex items-center gap-2 text-xs text-ink-soft"><input type="checkbox" checked={useTemplate} onChange={(e) => setUseTemplate(e.target.checked)} />Usar modelo sem IA</label>}
+          {ai === "ready" && !useTemplate && <Button variant="ghost" disabled={w === "loading"} onClick={() => write(true)}><RefreshCw className="h-4 w-4" />Outra versão</Button>}
+          <Button variant="outline" onClick={() => setPick(null)}>Cancelar</Button>
+          <Button disabled={w === "loading" && !useTemplate} onClick={() => { if (preview) { onCreate({ ...preview, origin: aiPost && !useTemplate ? "api" : "user" }); setPick(null); } }}>Abrir no editor</Button></>}>
         {pick && preview && (
           <div className="space-y-4">
             <Tabs value={approach} onChange={setApproach} items={(Object.keys(POST_APPROACH) as PostApproach[]).map((a) => ({ value: a, label: POST_APPROACH[a] }))} />
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_260px]">
               <div className="whitespace-pre-wrap rounded-2xl border border-paper-line bg-white p-5 text-sm leading-relaxed text-ink">
+                {ai === "ready" && !useTemplate && (w === "loading" ? <div className="flex items-center gap-2 py-16 text-ink-mute"><Loader2 className="h-4 w-4 animate-spin text-pink" />Escrevendo a partir do seu currículo e experiências…</div>
+                  : w && "error" in w ? <div className="mb-3 rounded-xl bg-pink-50 p-3 text-xs text-pink-700">IA indisponível: {w.error}. Mostrando o modelo sem IA.</div>
+                  : aiPost ? <div className="mb-3 flex items-center gap-1 text-[11px] font-medium text-pink"><Sparkles className="h-3 w-3" />Escrito pela IA com base no seu perfil — confira os fatos antes de publicar</div> : null)}
+                {!(ai === "ready" && !useTemplate && w === "loading") && <>
                 <p className="font-semibold">{preview.hook}</p>{"\n"}{preview.body}{"\n\n"}{preview.conclusion}{"\n\n"}<span className="text-green-600">{preview.cta}</span>{"\n\n"}<span className="text-pink-700">{preview.hashtags.join(" ")}</span>
+                </>}
               </div>
               <div className="space-y-3 text-xs text-ink-soft">
                 <div><div className="font-semibold text-ink">Formato recomendado</div>{POST_FORMAT[preview.format]}</div>
                 <div><div className="font-semibold text-ink">Orientação visual</div>{preview.visualGuide}</div>
                 <div><div className="font-semibold text-ink">Público</div>{preview.audience}</div>
-                <div><div className="font-semibold text-ink">Justificativa</div>{preview.rationale}</div>
+                <div className="whitespace-pre-wrap"><div className="font-semibold text-ink">Justificativa</div>{preview.rationale}</div>
                 <div><div className="font-semibold text-ink">Fontes</div>{preview.sources.length ? preview.sources.map((s) => s.label).join(", ") : "Nenhuma afirmação factual externa no modelo. Se adicionar dados, inclua a fonte."}</div>
               </div>
             </div>
