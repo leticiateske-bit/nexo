@@ -10,7 +10,8 @@ const body = Inter({ subsets: ["latin"], variable: "--font-body" });
 export const metadata: Metadata = {
   title: "NEXO — Career Intelligence",
   description: "Centro de inteligência pessoal para LinkedIn, networking e carreira.",
-  icons: { icon: "/favicon.svg" },
+  icons: { icon: "/favicon.svg", apple: "/apple-touch-icon.png" },
+  appleWebApp: { capable: true, title: "NEXO", statusBarStyle: "black-translucent" },
 };
 export const viewport: Viewport = { themeColor: "#082F25", width: "device-width", initialScale: 1 };
 
